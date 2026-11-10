@@ -299,6 +299,31 @@ def thread_title(thread: list[dict]) -> str:
     return thread[0]["norm"] or "제목없음"
 
 
+def _address(full: str) -> str:
+    m = re.search(r"<([^<>]+)>\s*$", full or "")
+    return (m.group(1) if m else (full or "")).strip().lower()
+
+
+def my_addresses(entries: list[dict]) -> set[str]:
+    """내 메일 주소: 보낸편지함에 있는 메일의 보낸사람 주소."""
+    sent_root = os.path.join("원본", "보낸편지함") + os.sep
+    return {_address(e["from"]) for e in entries
+            if e["path"].startswith(sent_root) and "@" in _address(e["from"])}
+
+
+def my_role(entry: dict, mine: set[str]) -> str:
+    """이 메일에서 나의 위치: 내가 보냄 / 받는사람 / 참조 / 기타(단체 주소·숨은참조 등)."""
+    if not mine:
+        return ""
+    if _address(entry["from"]) in mine:
+        return "내가 보냄"
+    if any(_address(a) in mine for a in entry["to"]):
+        return "받는사람"
+    if any(_address(a) in mine for a in entry["cc"]):
+        return "참조"
+    return "기타"
+
+
 def participants(thread: list[dict]) -> list[str]:
     names: dict[str, None] = {}
     for e in thread:
@@ -567,11 +592,20 @@ def run_textcopy(base_dir: str, on_progress=None, stop_event=None,
         tmp = csv_path + ".part"
         with open(tmp, "w", encoding="utf-8-sig", newline="") as fh:
             w = csv.writer(fh)
-            w.writerow(["마지막 날짜", "제목", "참여자", "메일 수", "파일위치"])
+            w.writerow(["마지막 날짜", "제목", "참여자", "메일 수", "파일위치", "첫 날짜",
+                        "마지막 보낸사람", "마지막 받는사람", "마지막 참조", "나의 위치"])
+            mine = my_addresses(entries)
             for thread, rel in rows:
                 last = _local(thread[-1]["date"])
+                first = _local(thread[0]["date"])
+                final = thread[-1]
                 w.writerow([last.strftime("%Y-%m-%d %H:%M") if last else "", thread_title(thread),
-                            ", ".join(participants(thread)), len(thread), rel])
+                            ", ".join(participants(thread)), len(thread), rel,
+                            first.strftime("%Y-%m-%d %H:%M") if first else "",
+                            _short_name(final["from"]),
+                            ", ".join(_short_name(a) for a in final["to"]),
+                            ", ".join(_short_name(a) for a in final["cc"]),
+                            my_role(final, mine)])
         os.replace(tmp, csv_path)
     except OSError:
         res.csv_ok = False  # 엑셀에서 열어 둔 경우 등

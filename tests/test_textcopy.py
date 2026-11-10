@@ -108,7 +108,8 @@ def test_thread_file_cleaning_attachments_csv(tmp_path):
     raw = open(os.path.join(base, "대화목록.csv"), "rb").read()
     assert raw.startswith(b"\xef\xbb\xbf")
     rows = list(csv.reader(raw.decode("utf-8-sig").splitlines()))
-    assert rows[0] == ["마지막 날짜", "제목", "참여자", "메일 수", "파일위치"]
+    assert rows[0] == ["마지막 날짜", "제목", "참여자", "메일 수", "파일위치", "첫 날짜",
+                       "마지막 보낸사람", "마지막 받는사람", "마지막 참조", "나의 위치"]
     assert rows[1][1] == "Shutdown plan" and rows[2][1] == "보일러 점검 일정"
     assert rows[2][3] == "2" and "홍길동" in rows[2][2] and "Élodie Dupont" in rows[2][2]
     assert os.path.exists(os.path.join(base, rows[2][4]))
@@ -269,3 +270,27 @@ def test_empty_source_keeps_existing_text(tmp_path):
     shutil.move(os.path.join(base, "원본"), os.path.join(base, "원본_옮김"))
     res = textcopy.run_textcopy(base)
     assert res.no_source and os.path.exists(path)
+
+
+def test_csv_shows_who_must_answer(tmp_path):
+    """목록만 보고 '내가 답할 것 / 내가 참조인 것 / 답을 기다리는 것'을 가릴 수 있다."""
+    base = str(tmp_path)
+    me = "나 <me@ambatovy.mg>"
+    make(base, "보낸편지함/2026-01", "s1", "자재 요청", me, "Boss <boss@ambatovy.mg>",
+         "Mon, 05 Jan 2026 08:00:00 +0000", "요청드립니다.", "<s1@x>")                      # 내가 보냄
+    make(base, "받은편지함/2026-01", "r1", "점검 결과 회신 요청", "Marie <marie@ambatovy.mg>", me,
+         "Tue, 06 Jan 2026 08:00:00 +0000", "회신 바랍니다.", "<r1@x>")                     # 나 = 받는사람
+    make(base, "받은편지함/2026-01", "r2", "예산 승인 요청", "Marie <marie@ambatovy.mg>",
+         "Boss <boss@ambatovy.mg>", "Wed, 07 Jan 2026 08:00:00 +0000", "승인 바랍니다.", "<r2@x>",
+         cc="ME@ambatovy.mg")                                                               # 나 = 참조
+    make(base, "받은편지함/2026-01", "r3", "Daily production report", "Reports <rep@ambatovy.mg>",
+         "All Staff <all@ambatovy.mg>", "Thu, 08 Jan 2026 08:00:00 +0000", "report", "<r3@x>")  # 단체 주소
+    textcopy.run_textcopy(base)
+    rows = list(csv.DictReader(open(os.path.join(base, "대화목록.csv"), encoding="utf-8-sig")))
+    by = {r["제목"]: r for r in rows}
+    assert by["자재 요청"]["나의 위치"] == "내가 보냄"
+    assert by["점검 결과 회신 요청"]["나의 위치"] == "받는사람"
+    assert by["예산 승인 요청"]["나의 위치"] == "참조"
+    assert by["예산 승인 요청"]["마지막 받는사람"] == "Boss" and by["예산 승인 요청"]["마지막 보낸사람"] == "Marie"
+    assert by["Daily production report"]["나의 위치"] == "기타"
+    assert by["자재 요청"]["첫 날짜"] == by["자재 요청"]["마지막 날짜"]
