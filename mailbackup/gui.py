@@ -8,9 +8,9 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
-from . import __version__, backup, ews, store
+from . import __version__, backup, ews, store, textcopy
 
 
 def friendly_error(exc: Exception) -> str:
@@ -37,7 +37,7 @@ def friendly_error(exc: Exception) -> str:
 class App:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.base_dir = store.default_base_dir()
+        self.base_dir = store.load_base_dir()
         self.events: queue.Queue = queue.Queue()
         self.stop_event = threading.Event()
         self.worker: threading.Thread | None = None
@@ -83,6 +83,8 @@ class App:
         self.stop_btn = ttk.Button(btns, text="중지", command=self.on_stop, state="disabled")
         self.stop_btn.pack(side="left", padx=8)
         ttk.Button(btns, text="저장 폴더 열기", command=self.open_folder).pack(side="right")
+        self.text_btn = ttk.Button(btns, text="텍스트 사본만 만들기", command=self.on_text_only)
+        self.text_btn.pack(side="right", padx=8)
 
         self.bar = ttk.Progressbar(frm, length=440, mode="determinate")
         self.bar.grid(row=7, column=0, columnspan=3, sticky="we")
@@ -92,9 +94,13 @@ class App:
         self.detail_var = tk.StringVar(value="")
         ttk.Label(frm, textvariable=self.detail_var, wraplength=440, justify="left",
                   foreground="#444").grid(row=9, column=0, columnspan=3, sticky="w", pady=(2, 0))
-        ttk.Label(frm, text="저장 위치: %s" % self.base_dir, foreground="#666",
-                  wraplength=440, justify="left").grid(row=10, column=0, columnspan=3, sticky="w",
-                                                       pady=(10, 0))
+        loc = ttk.Frame(frm)
+        loc.grid(row=10, column=0, columnspan=3, sticky="we", pady=(10, 0))
+        self.dir_btn = ttk.Button(loc, text="저장 위치 바꾸기", command=self.change_folder)
+        self.dir_btn.pack(side="right")
+        self.dir_var = tk.StringVar(value="저장 위치: %s" % self.base_dir)
+        ttk.Label(loc, textvariable=self.dir_var, foreground="#666", wraplength=330,
+                  justify="left").pack(side="left")
 
         self.pass_entry.bind("<Return>", lambda _e: self.on_start())
         self.user_entry.focus_set()
@@ -104,7 +110,8 @@ class App:
 
     def set_running(self, running: bool) -> None:
         state = "disabled" if running else "normal"
-        for w in (self.user_entry, self.pass_entry, self.recent_chk, self.days_spin, self.start_btn):
+        for w in (self.user_entry, self.pass_entry, self.recent_chk, self.days_spin, self.start_btn,
+                  self.text_btn, self.dir_btn):
             w.configure(state=state)
         self.stop_btn.configure(state="normal" if running else "disabled")
 
@@ -142,7 +149,8 @@ class App:
             prog = backup.run_backup(
                 client, self.base_dir, days=days, stop_event=self.stop_event, logger=logger,
                 on_progress=lambda p: self.events.put(("progress", backup.Progress(**vars(p)))))
-            self.events.put(("done", prog))
+            text = self.make_text(logger)
+            self.events.put(("done", (prog, text)))
         except ews.Stopped:
             self.events.put(("stopped", None))
         except Exception as exc:  # 화면에 쉬운 말로 알려 준다
@@ -150,6 +158,57 @@ class App:
         finally:
             if client is not None:
                 client.close()
+
+    def make_text(self, logger) -> textcopy.TextResult:
+        return textcopy.run_textcopy(
+            self.base_dir, stop_event=self.stop_event, logger=logger,
+            on_progress=lambda stage, done, total: self.events.put(("text", (stage, done, total))))
+
+    def on_text_only(self) -> None:
+        """서버에 연결하지 않고, 이미 받은 메일로 텍스트 사본만 만든다."""
+        if self.worker is not None and self.worker.is_alive():
+            return
+        self.stop_event.clear()
+        self.bar.configure(mode="indeterminate")
+        self.bar.start(15)
+        self.detail_var.set("")
+        self.set_running(True)
+        self.worker = threading.Thread(target=self.work_text_only, daemon=True)
+        self.worker.start()
+
+    def work_text_only(self) -> None:
+        try:
+            logger = backup.setup_logging(self.base_dir)
+            self.events.put(("done", (None, self.make_text(logger))))
+        except ews.Stopped:
+            self.events.put(("stopped", None))
+        except Exception as exc:
+            self.events.put(("error", exc))
+
+    def change_folder(self) -> None:
+        chosen = filedialog.askdirectory(
+            title="메일을 저장할 폴더를 골라 주세요", initialdir=os.path.dirname(self.base_dir) or None)
+        if not chosen:
+            return
+        chosen = os.path.normpath(chosen)
+        if os.path.basename(chosen).lower() != "mailbackup":
+            chosen = os.path.join(chosen, "MailBackup")
+        if chosen == self.base_dir:
+            return
+        try:
+            os.makedirs(chosen, exist_ok=True)
+            store.save_base_dir(chosen)
+        except OSError:
+            messagebox.showerror("메일 백업", "그 폴더에는 저장할 수 없습니다. 다른 폴더를 골라 주세요.")
+            return
+        old, self.base_dir = self.base_dir, chosen
+        self.dir_var.set("저장 위치: %s" % chosen)
+        if os.path.isdir(os.path.join(old, "원본")) and not os.path.isdir(os.path.join(chosen, "원본")):
+            messagebox.showinfo(
+                "메일 백업",
+                "저장 위치를 바꿨습니다.\n\n이미 받은 메일은 옮겨지지 않습니다. 이어서 받으려면 "
+                "예전 폴더의 내용(원본·상태·텍스트·첨부 폴더)을 새 폴더로 직접 옮겨 주세요.\n"
+                "옮기지 않으면 새 폴더에 처음부터 다시 받습니다.\n\n예전 폴더: %s" % old)
 
     def on_stop(self) -> None:
         self.stop_event.set()
@@ -163,6 +222,9 @@ class App:
                 kind, data = self.events.get_nowait()
                 if kind == "progress":
                     last_progress = data
+                elif kind == "text":
+                    last_progress = None
+                    self.show_text_progress(*data)
                 else:
                     if last_progress is not None:
                         self.show_progress(last_progress)
@@ -191,18 +253,41 @@ class App:
             self.detail_var.set("폴더: %s\n새로 저장 %s통 · 이미 받음 %s통 · 실패 %s통" % (
                 p.folder, format(p.saved, ","), format(p.skipped, ","), format(p.failed, ",")))
 
+    def show_text_progress(self, stage: str, done: int, total: int) -> None:
+        if total > 0:
+            if str(self.bar.cget("mode")) != "determinate":
+                self.bar.stop()
+                self.bar.configure(mode="determinate")
+            self.bar.configure(maximum=total, value=done)
+            self.status_var.set("텍스트 사본: %s  (%s / %s)" % (stage, format(done, ","), format(total, ",")))
+        else:
+            self.status_var.set("텍스트 사본: %s" % stage)
+
     def finish(self, kind: str, data) -> None:
         self.bar.stop()
         self.bar.configure(mode="determinate")
         self.set_running(False)
         if kind == "done":
-            p: backup.Progress = data
+            p, t = data
             self.bar.configure(maximum=1, value=1)
-            self.status_var.set("백업이 끝났습니다.")
-            msg = "새로 저장 %s통 · 이미 받아서 건너뜀 %s통" % (format(p.saved, ","), format(p.skipped, ","))
-            if p.failed:
-                msg += " · 받지 못함 %s통\n받지 못한 메일은 다음에 실행하면 다시 시도합니다." % format(p.failed, ",")
-            self.detail_var.set(msg)
+            lines = []
+            if p is not None:
+                self.status_var.set("백업과 텍스트 사본 만들기가 끝났습니다.")
+                msg = "메일: 새로 저장 %s통 · 이미 받아서 건너뜀 %s통" % (
+                    format(p.saved, ","), format(p.skipped, ","))
+                if p.failed:
+                    msg += " · 받지 못함 %s통 (다음 실행 때 다시 시도)" % format(p.failed, ",")
+                lines.append(msg)
+            else:
+                self.status_var.set("텍스트 사본 만들기가 끝났습니다.")
+            msg = "텍스트 사본: 대화 %s개 중 %s개를 새로 쓰거나 갱신" % (
+                format(t.threads, ","), format(t.written, ","))
+            if t.failed:
+                msg += " · 읽지 못한 메일 %s통" % format(t.failed, ",")
+            lines.append(msg)
+            if not t.csv_ok:
+                lines.append("대화목록.csv 를 저장하지 못했습니다. 엑셀에서 열려 있으면 닫고 다시 실행해 주세요.")
+            self.detail_var.set("\n".join(lines))
         elif kind == "stopped":
             self.status_var.set("중지했습니다. 다시 [백업 시작]을 누르면 이어서 받습니다.")
         elif kind == "error":

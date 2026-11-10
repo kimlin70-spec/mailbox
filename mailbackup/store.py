@@ -32,6 +32,31 @@ def default_base_dir() -> str:
     return os.path.join(documents_dir(), "MailBackup")
 
 
+def _settings_path() -> str:
+    root = os.environ.get("APPDATA") or os.path.join(os.path.expanduser("~"), ".config")
+    return os.path.join(root, "MailBackup", "settings.json")
+
+
+def load_base_dir() -> str:
+    """저장 위치. 따로 정한 적이 없으면 내 문서\\MailBackup."""
+    try:
+        with open(_settings_path(), "r", encoding="utf-8") as fh:
+            value = json.load(fh).get("base_dir")
+        if isinstance(value, str) and value:
+            return value
+    except (OSError, ValueError, AttributeError):
+        pass
+    return default_base_dir()
+
+
+def save_base_dir(base_dir: str) -> None:
+    """저장 위치만 기억한다. (아이디·비밀번호는 저장하지 않는다.)"""
+    path = _settings_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump({"base_dir": base_dir}, fh, ensure_ascii=False)
+
+
 class Index:
     """이미 받은 메일 목록. 한 줄에 한 통씩 덧붙여 기록한다."""
 
