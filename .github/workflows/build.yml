@@ -1,0 +1,36 @@
+name: exe 만들기
+
+on:
+  push:
+    branches: [main, "claude/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 필요한 부품 설치
+        run: pip install -r requirements.txt pytest pyinstaller==6.22.3
+      - name: 시험
+        run: python -m pytest -q
+      - name: exe 만들기
+        run: pyinstaller --onefile --windowed --name MailBackup main.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MailBackup
+          path: dist/MailBackup.exe
+      - name: 내려받기 페이지에 올리기
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --cleanup-tag --yes || true
+          gh release create latest dist/MailBackup.exe --target "$GITHUB_SHA" \
+            --title "메일 백업 (최신)" --notes "MailBackup.exe 를 내려받아 더블클릭하면 실행됩니다."
