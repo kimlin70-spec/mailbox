@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
@@ -12,6 +13,42 @@ from . import ews, naming, store
 PAGE_SIZE = 50            # 목록은 한 번에 50통씩 확인
 BATCH_COUNT = 10          # 원본은 한 번에 최대 10통씩
 BATCH_BYTES = 15 * 1024 * 1024  # 또는 합계 약 15MB까지
+
+MIN_FREE_BYTES = 500 * 1024 * 1024  # 디스크에 최소 이만큼은 남긴다
+
+
+class LowDisk(Exception):
+    """저장할 디스크의 여유 공간이 부족함."""
+
+
+def check_disk(base_dir: str, need: int = 0) -> None:
+    try:
+        free = shutil.disk_usage(base_dir).free
+    except OSError:
+        return
+    if free < MIN_FREE_BYTES + need:
+        raise LowDisk()
+
+
+def _get_mime_safely(client, ids: list[str]) -> list[ews.MimeResult]:
+    """묶음 전체가 거절되면 한 통씩 다시 받아, 문제 있는 메일만 건너뛴다."""
+    try:
+        return client.get_mime(ids)
+    except ews.EwsError as exc:
+        if exc.code == "ErrorServerBusy" or len(ids) == 1:
+            if len(ids) == 1 and exc.code != "ErrorServerBusy":
+                return [ews.MimeResult(ids[0], None, exc.code)]
+            raise
+    results = []
+    for item_id in ids:
+        try:
+            results.extend(client.get_mime([item_id]))
+        except ews.EwsError as exc:
+            if exc.code == "ErrorServerBusy":
+                raise
+            results.append(ews.MimeResult(item_id, None, exc.code))
+    return results
+
 
 ROOTS = (
     ("받은편지함", ews.INBOX),
@@ -101,6 +138,7 @@ def run_backup(client: ews.EwsClient, base_dir: str, days: int | None = None,
         since = (datetime.now(timezone.utc) - timedelta(days=days)).replace(microsecond=0)
 
     os.makedirs(base_dir, exist_ok=True)
+    check_disk(base_dir)
     index = store.Index(base_dir)
     try:
         report("서버에 연결하는 중…")
@@ -167,7 +205,8 @@ def _backup_folder(client, index, base_dir, f: _Folder, since, prog: Progress,
             while todo and len(batch) < BATCH_COUNT and (not batch or size + todo[0][1].size <= BATCH_BYTES):
                 size += todo[0][1].size
                 batch.append(todo.pop(0))
-            results = client.get_mime([it.item_id for _, it in batch])
+            check_disk(base_dir, size * 2)
+            results = _get_mime_safely(client, [it.item_id for _, it in batch])
             for (key, it), res in zip(batch, results):
                 prog.checked += 1
                 if key in index:  # 같은 묶음 안에 같은 메일이 두 번 있는 경우

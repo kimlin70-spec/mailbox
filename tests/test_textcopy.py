@@ -98,11 +98,11 @@ def test_thread_file_cleaning_attachments_csv(tmp_path):
     assert "confidential" not in md
     assert "Tel. +261" not in md and "Ingénieure maintenance" not in md
     assert "감사합니다." in md and "Cordialement," in md
-    # 첨부: 파일명만 적고 파일은 첨부 폴더에 (서명 로고는 제외)
-    assert "- 첨부: 점검 계획서.pdf → " in md and "%PDF" not in md
-    att = glob.glob(os.path.join(base, "첨부", "2026-01", "*"))
-    assert len(att) == 1 and att[0].endswith("점검 계획서.pdf")
-    assert open(att[0], "rb").read() == b"%PDF-plan"
+    # 첨부: 파일명만 적고 파일은 꺼내지 않는다 (서명 로고는 목록에서도 제외)
+    assert "- 첨부: 점검 계획서.pdf (원본 메일을 열어서 확인)" in md and "%PDF" not in md
+    assert "logo.png" not in md
+    assert "- 원본 메일: " in md and "m1.eml" in md
+    assert not os.path.exists(os.path.join(base, "첨부"))
 
     # CSV: UTF-8(BOM), 마지막 날짜순
     raw = open(os.path.join(base, "대화목록.csv"), "rb").read()
@@ -201,6 +201,22 @@ def test_cleaner_rules():
     assert "P.S." in cleaner.strip_signature(text)
     assert cleaner.strip_signature("내용\n\nSent from my iPhone") == "내용"
     assert cleaner.strip_signature("내용\n-- \n홍길동\n010-0000-0000") == "내용"
+    # 맺음말 뒤에 문장이 이어지면 서명이 아니다
+    text = "자료 보냅니다.\n\n감사합니다.\n참고로 내일은 휴가입니다.\n급한 건은 김 과장에게 연락 주세요."
+    assert cleaner.strip_signature(text) == text
+    # 구분선 아래에 내용이 있으면 남긴다
+    text = "1안\n--\n2안은 다음 주에 다시 검토하겠습니다."
+    assert cleaner.strip_signature(text) == text
+    # 평범한 문장은 면책 문구가 아니다
+    text = "안녕하세요.\n\nThis message is intended for all shift supervisors.\nPlease check the schedule."
+    assert cleaner.strip_disclaimer(text) == text
+    text = "본문\n\nThis email contains confidential pricing.\n단가는 첨부를 참고하세요."
+    assert cleaner.strip_disclaimer(text) == text
+    # 빈 칸이 많은 표도 바로 처리된다
+    import time
+    t0 = time.time()
+    out = cleaner.html_to_text("<table><tr>" + "<td></td>" * 60 + "<td>값</td></tr></table>")
+    assert "값" in out and time.time() - t0 < 1
     # Gmail 식 인용
     earlier = [cleaner.squash("원래 메일의 내용이 여기에 충분히 길게 있습니다.")]
     reply = "네 알겠습니다.\n\n2026년 1월 5일 (월) 오후 3:00, 홍길동 <a@b>님이 작성:\n> 원래 메일의 내용이 여기에 충분히 길게 있습니다."
@@ -217,3 +233,54 @@ def test_orphan_reply_joins_by_subject(tmp_path):
     make(base, "받은편지함/2026-01", "o2", "RE: 예산 검토", "me@b.c", "a@b.c",
          "Mon, 05 Jan 2026 09:00:00 +0000", "확인했습니다.", "<o2@x>")  # 연결 정보 없음
     assert textcopy.run_textcopy(base).threads == 1
+
+
+def test_inline_reply_below_quote_is_kept(tmp_path):
+    """인용 사이·아래에 새로 적은 답변이 있으면 인용을 지우지 않는다."""
+    base = str(tmp_path)
+    body1 = "질문 1: 점검 일정은 언제가 좋을까요?\n질문 2: 필요한 인원은 몇 명입니까?"
+    make(base, "받은편지함/2026-01", "q1", "질문", "a@b.c", "me@b.c",
+         "Mon, 05 Jan 2026 08:00:00 +0000", body1, "<q1@x>")
+    body2 = ("아래에 답변 적었습니다.\n\n-----Original Message-----\nFrom: a@b.c\nSent: Monday\nTo: me@b.c\n"
+             "Subject: 질문\n\n질문 1: 점검 일정은 언제가 좋을까요?\n=> 다음 주 화요일이 가장 좋겠습니다.\n"
+             "질문 2: 필요한 인원은 몇 명입니까?\n=> 세 명이면 충분합니다.")
+    make(base, "받은편지함/2026-01", "q2", "RE: 질문", "me@b.c", "a@b.c",
+         "Mon, 05 Jan 2026 09:00:00 +0000", body2, "<q2@x>", reply_to="<q1@x>")
+    textcopy.run_textcopy(base)
+    _, md = read(base, "질문.md")
+    assert "다음 주 화요일이 가장 좋겠습니다" in md and "세 명이면 충분합니다" in md
+
+
+def test_upgrade_removes_extracted_attachments_and_old_text(tmp_path):
+    import json
+    base = str(tmp_path)
+    first_mail(base)
+    os.makedirs(os.path.join(base, "상태"))
+    os.makedirs(os.path.join(base, "첨부", "2026-01"))
+    os.makedirs(os.path.join(base, "텍스트", "2026-01"))
+    att = os.path.join("첨부", "2026-01", "2026-01-05_0800_견적서.pdf.exe")
+    mine = os.path.join(base, "첨부", "2026-01", "내가 넣은 파일.txt")
+    for path in (os.path.join(base, att), mine, os.path.join(base, "텍스트", "2026-01", "보일러 점검 일정.md")):
+        open(path, "w").close()
+    with open(os.path.join(base, "상태", "텍스트색인_v1.jsonl"), "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"path": "x", "atts": [["견적서.pdf.exe", att], ["x", "../../outside.txt"]]}) + "\n")
+    with open(os.path.join(base, "상태", "대화파일.json"), "w", encoding="utf-8") as fh:
+        json.dump({"version": 1, "files": {os.path.join("텍스트", "2026-01", "보일러 점검 일정.md"): ["<m1@x>"]}}, fh)
+    textcopy.run_textcopy(base)
+    assert not os.path.exists(os.path.join(base, att))      # 프로그램이 꺼냈던 첨부는 정리
+    assert os.path.exists(mine)                              # 사용자가 넣은 파일은 그대로
+    assert not os.path.exists(os.path.join(base, "상태", "텍스트색인_v1.jsonl"))
+    names = os.listdir(os.path.join(base, "텍스트", "2026-01"))
+    assert names == ["보일러 점검 일정.md"]                   # _2 중복 없이 새로 만들어짐
+    assert "원본 메일" in open(os.path.join(base, "텍스트", "2026-01", names[0]), encoding="utf-8").read()
+
+
+def test_empty_source_keeps_existing_text(tmp_path):
+    import shutil
+    base = str(tmp_path)
+    first_mail(base)
+    textcopy.run_textcopy(base)
+    path, _ = read(base, "*.md")
+    shutil.move(os.path.join(base, "원본"), os.path.join(base, "원본_옮김"))
+    res = textcopy.run_textcopy(base)
+    assert res.no_source and os.path.exists(path)

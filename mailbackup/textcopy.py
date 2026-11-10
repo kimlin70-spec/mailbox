@@ -3,8 +3,10 @@
 백업해 둔 .eml 파일을 이 PC 안에서만 변환한다. (서버·외부 서비스에 연결하지 않는다.)
 
   텍스트\\YYYY-MM\\대화제목.md   같은 대화(스레드)를 시간순으로 한 파일에
-  첨부\\YYYY-MM\\날짜_시분_파일명  첨부 파일
   대화목록.csv                  전체 대화 목록
+
+첨부 파일은 꺼내지 않는다. 파일명만 적고, 내용은 원본 메일(.eml)을 열어서 본다.
+(메일에 섞여 온 위험한 파일이 PC에 바로 실행 가능한 형태로 놓이지 않게 하기 위함)
 """
 
 from __future__ import annotations
@@ -15,7 +17,6 @@ import csv
 import email
 import email.policy
 import email.utils
-import hashlib
 import json
 import logging
 import os
@@ -26,7 +27,7 @@ from datetime import datetime, timezone
 from . import cleaner, naming
 from .ews import Stopped
 
-VERSION = 1  # 변환 규칙이 바뀌면 올린다 → 전체를 다시 만든다
+VERSION = 2  # 변환 규칙이 바뀌면 올린다 → 전체를 다시 만든다
 CACHE_FILE = "텍스트색인_v%d.jsonl" % VERSION
 THREADS_FILE = "대화파일.json"
 CSV_FILE = "대화목록.csv"
@@ -44,6 +45,7 @@ class TextResult:
     written: int = 0      # 이번에 새로 쓰거나 갱신한 대화 파일 수
     failed: int = 0       # 읽지 못한 메일 수
     csv_ok: bool = True
+    no_source: bool = False  # 원본 메일이 하나도 없음
 
 
 # ---------------------------------------------------------------- .eml 읽기
@@ -154,8 +156,8 @@ def _is_inline_image(part, html: str) -> bool:
     return part.get_content_disposition() == "inline" and bool(cid)
 
 
-def _save_attachments(msg, base_dir: str, date: datetime | None) -> list[list[str]]:
-    """첨부를 첨부\\YYYY-MM\\ 에 저장하고 [[원래 이름, 저장 경로], …] 를 돌려준다."""
+def _attachment_names(msg) -> list[str]:
+    """첨부 파일 이름 목록. (파일은 꺼내지 않는다.)"""
     html = ""
     try:
         hp = msg.get_body(preferencelist=("html",))
@@ -163,59 +165,26 @@ def _save_attachments(msg, base_dir: str, date: datetime | None) -> list[list[st
             html = _decode(hp) or ""
     except Exception:
         pass
-    saved = []
-    stamp = date.astimezone().strftime("%Y-%m-%d_%H%M") if date else "날짜없음"
+    names = []
     for part in msg.walk():
-        if part.is_multipart() and part.get_content_type() != "message/rfc822":
+        is_mail = part.get_content_type() == "message/rfc822"
+        if part.is_multipart() and not is_mail:
             continue
-        filename = None
         try:
             filename = part.get_filename()
         except Exception:
-            pass
+            filename = None
         disp = part.get_content_disposition()
-        if part.get_content_type() == "message/rfc822":
-            if disp != "attachment" and not filename:
+        if is_mail and not filename:
+            if disp != "attachment":
                 continue
-            filename = filename or "첨부메일.eml"
+            filename = "첨부메일.eml"
         if not filename and disp != "attachment":
             continue
         if _is_inline_image(part, html):
             continue
-        try:
-            if part.get_content_type() == "message/rfc822":
-                inner = part.get_payload()
-                inner = inner[0] if isinstance(inner, list) and inner else inner
-                data = inner.as_bytes() if hasattr(inner, "as_bytes") else b""
-            else:
-                data = part.get_payload(decode=True) or b""
-        except Exception:
-            continue
-        orig = naming.clean(filename or "이름없는첨부", 100, "이름없는첨부")
-        stem, ext = os.path.splitext(orig)
-        rel_dir = os.path.join("첨부", naming.month_folder(date))
-        abs_dir = os.path.join(base_dir, rel_dir)
-        os.makedirs(abs_dir, exist_ok=True)
-        full_stem = "%s_%s" % (stamp, stem)
-        # 같은 내용이 이미 있으면 다시 쓰지 않는다
-        path, n = os.path.join(abs_dir, full_stem + ext), 2
-        while os.path.exists(path):
-            if os.path.getsize(path) == len(data) and _same(path, data):
-                break
-            path = os.path.join(abs_dir, "%s_%d%s" % (full_stem, n, ext))
-            n += 1
-        else:
-            tmp = path + ".part"
-            with open(tmp, "wb") as fh:
-                fh.write(data)
-            os.replace(tmp, path)
-        saved.append([orig, os.path.relpath(path, base_dir)])
-    return saved
-
-
-def _same(path: str, data: bytes) -> bool:
-    with open(path, "rb") as fh:
-        return hashlib.sha1(fh.read()).digest() == hashlib.sha1(data).digest()
+        names.append(naming.clean(filename or "이름없는첨부", 100, "이름없는첨부"))
+    return names
 
 
 def _read_eml(base_dir: str, rel_path: str):
@@ -242,7 +211,7 @@ def _index_eml(base_dir: str, rel_path: str) -> dict:
         "from": senders[0] if senders else "",
         "to": _addresses(msg, "To"),
         "cc": _addresses(msg, "Cc"),
-        "atts": _save_attachments(msg, base_dir, date),
+        "atts": _attachment_names(msg),
     }
 
 
@@ -361,7 +330,8 @@ def render_thread(base_dir: str, thread: list[dict]) -> str:
                 "- 참조: %s" % ("; ".join(e["cc"]) or "-"),
                 "- 제목: %s" % (e["subject"] or "(제목 없음)")]
         if e["atts"]:
-            out.append("- 첨부: %s" % "; ".join("%s → %s" % (a[0], a[1]) for a in e["atts"]))
+            out.append("- 첨부: %s (원본 메일을 열어서 확인)" % "; ".join(e["atts"]))
+        out.append("- 원본 메일: %s" % e["path"])
         out += ["", body or "(본문 없음)", ""]
     return "\n".join(out).rstrip() + "\n"
 
@@ -381,6 +351,65 @@ def _load_json(path: str, default):
         return default
 
 
+def _remove_old_version_output(base_dir: str, state_dir: str, log) -> None:
+    """예전 버전이 만든 결과물 정리: 꺼내 놓았던 첨부 파일과 예전 규칙의 대화 파일.
+
+    이 프로그램이 만들었다고 기록해 둔 파일만 지운다. 원본 .eml 은 건드리지 않는다.
+    """
+    removed = 0
+    old_cache = os.path.join(state_dir, "텍스트색인_v1.jsonl")
+    if os.path.exists(old_cache):
+        att_root = os.path.join(base_dir, "첨부")
+        with open(old_cache, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                try:
+                    atts = json.loads(line).get("atts", [])
+                except (ValueError, AttributeError):
+                    continue
+                for att in atts:
+                    if not (isinstance(att, list) and len(att) == 2 and isinstance(att[1], str)):
+                        continue
+                    path = os.path.normpath(os.path.join(base_dir, att[1]))
+                    if not path.startswith(att_root + os.sep):
+                        continue
+                    try:
+                        os.remove(path)
+                        removed += 1
+                    except OSError:
+                        pass
+        if os.path.isdir(att_root):
+            for name in os.listdir(att_root):
+                try:
+                    os.rmdir(os.path.join(att_root, name))  # 빈 폴더만 지워진다
+                except OSError:
+                    pass
+            try:
+                os.rmdir(att_root)
+            except OSError:
+                pass
+        try:
+            os.remove(old_cache)
+        except OSError:
+            pass
+    threads_path = os.path.join(state_dir, THREADS_FILE)
+    state = _load_json(threads_path, {})
+    if isinstance(state, dict) and state.get("version") not in (None, VERSION):
+        text_root = os.path.join(base_dir, "텍스트")
+        for rel in state.get("files", {}):
+            path = os.path.normpath(os.path.join(base_dir, rel))
+            if path.startswith(text_root + os.sep) and path.endswith(".md"):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+        try:
+            os.remove(threads_path)
+        except OSError:
+            pass
+    if removed:
+        log.info("예전 버전이 꺼내 둔 첨부 파일 %d개 정리", removed)
+
+
 def run_textcopy(base_dir: str, on_progress=None, stop_event=None,
                  logger: logging.Logger | None = None) -> TextResult:
     log = logger or logging.getLogger("mailbackup")
@@ -396,11 +425,13 @@ def run_textcopy(base_dir: str, on_progress=None, stop_event=None,
         if stop_event is not None and stop_event.is_set():
             raise Stopped()
 
+    _remove_old_version_output(base_dir, state_dir, log)
+
     # 1) 새로 받은 .eml 읽기 (한 번 읽은 메일은 색인에 적어 두고 다시 읽지 않는다)
     cache_path = os.path.join(state_dir, CACHE_FILE)
     cache: dict[str, dict] = {}
     if os.path.exists(cache_path):
-        with open(cache_path, "r", encoding="utf-8") as fh:
+        with open(cache_path, "r", encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 try:
                     e = json.loads(line)
@@ -417,6 +448,11 @@ def run_textcopy(base_dir: str, on_progress=None, stop_event=None,
     eml_paths.sort()
     todo = [p for p in eml_paths if p not in cache]
     res.mails = len(eml_paths)
+    if not eml_paths:
+        # 원본 폴더가 비어 있으면(폴더를 옮기는 중 등) 기존 텍스트 사본을 지우지 않고 그대로 둔다.
+        res.no_source = True
+        log.info("텍스트 사본: 원본 메일이 없어 아무것도 바꾸지 않음")
+        return res
 
     with open(cache_path, "a", encoding="utf-8") as fh:
         for i, rel in enumerate(todo):
@@ -447,6 +483,7 @@ def run_textcopy(base_dir: str, on_progress=None, stop_event=None,
     key_to_file = {k: f for f, keys in old_files.items() for k in keys}
     new_files: dict[str, list[str]] = {}
     rows = []
+    claimed: set[str] = set()  # 이번 실행에서 이미 다른 대화가 쓰고 있는 파일
 
     def save_state():
         merged = dict(old_files)
@@ -465,19 +502,20 @@ def run_textcopy(base_dir: str, on_progress=None, stop_event=None,
             stem = naming.clean(thread_title(thread), 80, "제목없음")
 
             rel = None
-            if len(previous) == 1:
+            if len(previous) == 1 and next(iter(previous)) not in claimed:
                 old = next(iter(previous))
                 same_place = os.path.dirname(old) == rel_dir and re.fullmatch(
                     re.escape(stem) + r"(_\d+)?\.md", os.path.basename(old))
                 if same_place and os.path.exists(os.path.join(base_dir, old)):
                     if set(old_files.get(old, [])) == set(keys):
                         new_files[old] = keys  # 바뀐 것 없음
+                        claimed.add(old)
                         rows.append((thread, old))
                         continue
                     rel = old  # 같은 파일을 갱신
 
             for old in previous:
-                if old != rel:
+                if old != rel and old not in claimed:
                     try:
                         os.remove(os.path.join(base_dir, old))
                     except OSError:
@@ -487,8 +525,16 @@ def run_textcopy(base_dir: str, on_progress=None, stop_event=None,
                 os.makedirs(os.path.join(base_dir, rel_dir), exist_ok=True)
                 rel = os.path.relpath(
                     naming.unique_path(os.path.join(base_dir, rel_dir), stem, ".md"), base_dir)
-            _write_text(os.path.join(base_dir, rel), render_thread(base_dir, thread))
+            try:
+                _write_text(os.path.join(base_dir, rel), render_thread(base_dir, thread))
+            except OSError as exc:
+                if getattr(exc, "errno", None) == 28:  # 디스크 공간 부족
+                    raise
+                res.failed += 1  # 이 대화만 건너뛰고 다음 실행 때 다시 시도
+                log.info("대화 파일 쓰기 실패: %s", type(exc).__name__)
+                continue
             new_files[rel] = keys
+            claimed.add(rel)
             rows.append((thread, rel))
             res.written += 1
             if res.written % 200 == 0:

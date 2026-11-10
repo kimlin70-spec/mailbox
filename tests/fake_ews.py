@@ -6,7 +6,12 @@ import base64
 import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from xml.sax.saxutils import escape, quoteattr
+from xml.sax.saxutils import escape as _escape, quoteattr
+
+
+def escape(text):
+    # Exchange 는 제어문자를 &#x1F; 같은 형태로 보낸다 (XML 규격상 잘못된 문자)
+    return _escape(text).replace("\x1f", "&#x1F;")
 
 NS = ('xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" '
       'xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types" '
@@ -16,6 +21,10 @@ NS = ('xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" '
 def env(body: str) -> bytes:
     return ('<?xml version="1.0" encoding="utf-8"?><s:Envelope %s><s:Body>%s</s:Body></s:Envelope>'
             % (NS, body)).encode("utf-8")
+
+
+class _Fault(Exception):
+    pass
 
 
 class FakeMailbox:
@@ -32,6 +41,7 @@ class FakeMailbox:
         self.operations: list[str] = []
         self.busy_once = False
         self.get_item_calls: list[int] = []
+        self.fault_ids: set[str] = set()  # 이 메일이 포함된 요청은 통째로 거절
 
     def add(self, folder, item_id, subject, sender, received, mid=None, body="본문", error=None):
         mime = ("From: %s\r\nSubject: =?utf-8?b?%s?=\r\nMessage-ID: %s\r\n\r\n%s" % (
@@ -52,7 +62,13 @@ class FakeMailbox:
                 'ErrorServerBusy</e:ResponseCode>'
                 '<t:MessageXml><t:Value Name="BackOffMilliseconds">100</t:Value></t:MessageXml>'
                 '</detail></s:Fault>')
-        return 200, getattr(self, "op_" + op)(xml)
+        try:
+            return 200, getattr(self, "op_" + op)(xml)
+        except _Fault:
+            return 500, env(
+                '<s:Fault><faultcode>a:ErrorInternalServerError</faultcode><detail>'
+                '<e:ResponseCode xmlns:e="http://schemas.microsoft.com/exchange/services/2006/errors">'
+                'ErrorInternalServerError</e:ResponseCode></detail></s:Fault>')
 
     @staticmethod
     def _parent(xml: str) -> str:
@@ -111,6 +127,8 @@ class FakeMailbox:
     def op_GetItem(self, xml):
         ids = re.findall(r'<t:ItemId Id="([^"]+)"', xml)
         self.get_item_calls.append(len(ids))
+        if self.fault_ids & set(ids):
+            raise _Fault()
         by_id = {i["id"]: i for lst in self.items.values() for i in lst}
         parts = ""
         for iid in ids:

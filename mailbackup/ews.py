@@ -218,11 +218,7 @@ class EwsClient:
             if 300 <= resp.status_code < 400:
                 raise UnexpectedServer("HTTP %d" % resp.status_code)
 
-            root = None
-            try:
-                root = ET.fromstring(resp.content)
-            except ET.ParseError:
-                pass
+            root = _parse_xml(resp.content)
 
             busy_ms = _busy_backoff(root) if root is not None else None
             if busy_ms is not None or resp.status_code in (429, 502, 503, 504):
@@ -367,6 +363,23 @@ class EwsClient:
             except ValueError:
                 results.append(MimeResult(item_id, None, "BadMimeContent"))
         return results
+
+
+_BAD_REF = re.compile(
+    rb"&#(?:[xX]0*(?:[0-8bcefBCEF]|1[0-9a-fA-F])|0*(?:[0-8]|1[124-9]|2[0-9]|3[01]));")
+_BAD_RAW = re.compile(rb"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def _parse_xml(content: bytes) -> ET.Element | None:
+    """서버 응답을 읽는다. 제목 등에 섞인 제어문자 때문에 읽지 못하면 그 문자만 빼고 다시 읽는다."""
+    try:
+        return ET.fromstring(content)
+    except ET.ParseError:
+        pass
+    try:
+        return ET.fromstring(_BAD_RAW.sub(b"", _BAD_REF.sub(b"", content)))
+    except ET.ParseError:
+        return None
 
 
 class Stopped(Exception):

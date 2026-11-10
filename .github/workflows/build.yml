@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: build
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: windows-latest
@@ -26,11 +30,25 @@ jobs:
         with:
           name: MailBackup
           path: dist/MailBackup.exe
+      # 내려받기 페이지의 exe 는 버전 번호가 올라갈 때만 새로 올린다.
+      # (작업 중인 코드를 올려도 이미 공개된 버전의 exe 는 바뀌지 않는다.)
       - name: 내려받기 페이지에 올리기
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release delete latest --cleanup-tag --yes || true
-          gh release create latest dist/MailBackup.exe --target "$GITHUB_SHA" \
-            --title "메일 백업 (최신)" --notes "MailBackup.exe 를 내려받아 더블클릭하면 실행됩니다."
+          VERSION=$(python -c "import mailbackup; print(mailbackup.__version__)")
+          TAG="v$VERSION"
+          gh release delete latest --cleanup-tag --yes 2>/dev/null || true
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "$TAG 는 이미 공개되어 있어 바꾸지 않습니다."
+            exit 0
+          fi
+          SHA=$(sha256sum dist/MailBackup.exe | cut -d' ' -f1)
+          gh release create "$TAG" dist/MailBackup.exe --target "$GITHUB_SHA" \
+            --title "메일 백업 $VERSION" \
+            --notes "MailBackup.exe 를 내려받아 더블클릭하면 실행됩니다.
+
+          - 버전: $VERSION (창 제목에 같은 번호가 표시됩니다)
+          - 만든 코드: $GITHUB_SHA
+          - 파일 확인값(SHA256): $SHA"

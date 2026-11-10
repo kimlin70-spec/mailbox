@@ -28,8 +28,71 @@ def documents_dir() -> str:
     return os.path.join(os.path.expanduser("~"), "Documents")
 
 
+def desktop_dir() -> str:
+    """바탕화면 폴더의 실제 위치."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            buf = ctypes.create_unicode_buffer(wintypes.MAX_PATH)
+            # CSIDL_DESKTOPDIRECTORY = 0x10
+            if ctypes.windll.shell32.SHGetFolderPathW(None, 0x10, None, 0, buf) == 0 and buf.value:
+                return buf.value
+        except Exception:
+            pass
+    return os.path.join(os.path.expanduser("~"), "Desktop")
+
+
 def default_base_dir() -> str:
+    return os.path.join(desktop_dir(), "MailBackup")
+
+
+def old_default_base_dir() -> str:
+    """0.2 버전까지의 기본 위치 (내 문서\\MailBackup)."""
     return os.path.join(documents_dir(), "MailBackup")
+
+
+def cloud_sync_name(path: str) -> str:
+    """경로가 클라우드와 자동 동기화되는 폴더 안이면 그 서비스 이름, 아니면 빈 문자열."""
+    norm = os.path.normcase(os.path.abspath(path))
+    for var in ("OneDrive", "OneDriveConsumer", "OneDriveCommercial"):
+        root = os.environ.get(var)
+        if root and (norm + os.sep).startswith(os.path.normcase(os.path.abspath(root)) + os.sep):
+            return "OneDrive"
+    parts = [p.lower() for p in norm.replace("\\", "/").split("/")]
+    for part in parts:
+        if part.startswith("onedrive"):
+            return "OneDrive"
+        if part in ("dropbox", "google drive", "googledrive", "my drive", "내 드라이브", "icloud drive",
+                    "iclouddrive"):
+            return "클라우드"
+    return ""
+
+
+def has_saved_base_dir() -> bool:
+    return os.path.exists(_settings_path())
+
+
+def acquire_lock(base_dir: str):
+    """같은 저장 폴더로 두 번 동시에 실행되는 것을 막는다. 이미 실행 중이면 None."""
+    state = os.path.join(base_dir, STATE_DIR)
+    os.makedirs(state, exist_ok=True)
+    fh = open(os.path.join(state, "실행중.lock"), "a+")
+    try:
+        fh.seek(0)
+        if sys.platform == "win32":
+            import msvcrt
+
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.close()
+        return None
+    return fh
 
 
 def _settings_path() -> str:
@@ -38,7 +101,7 @@ def _settings_path() -> str:
 
 
 def load_base_dir() -> str:
-    """저장 위치. 따로 정한 적이 없으면 내 문서\\MailBackup."""
+    """저장 위치. 따로 정한 적이 없으면 바탕화면\\MailBackup."""
     try:
         with open(_settings_path(), "r", encoding="utf-8") as fh:
             value = json.load(fh).get("base_dir")
@@ -66,13 +129,15 @@ class Index:
         self._keys: set[str] = set()
         os.makedirs(self._dir, exist_ok=True)
         if os.path.exists(self._path):
-            with open(self._path, "r", encoding="utf-8") as fh:
+            with open(self._path, "r", encoding="utf-8", errors="replace") as fh:
                 for line in fh:
                     try:
                         self._keys.add(json.loads(line)["key"])
                     except (ValueError, KeyError, TypeError):
                         continue  # 기록 도중 끊긴 줄은 무시 (그 메일은 다시 받는다)
         self._fh = open(self._path, "a", encoding="utf-8")
+        if self._fh.tell() > 0:  # 지난번에 줄 중간에서 끊겼어도 새 기록이 붙어 버리지 않게
+            self._fh.write("\n")
 
     def __contains__(self, key: str) -> bool:
         return key in self._keys

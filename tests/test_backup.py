@@ -221,3 +221,69 @@ def test_redirect_is_refused():
 def test_only_one_server_address():
     assert ews.EWS_URL == "https://mail.ambatovy.mg/EWS/Exchange.asmx"
     assert store.item_key("받은편지함", "<a@x>", "ID") != store.item_key("보낸편지함", "<a@x>", "ID")
+
+
+def test_control_character_in_subject_does_not_stop(server, tmp_path):
+    mb, url = server
+    mb.add("inbox", "A", "정상 메일", "홍길동", "2026-01-05T08:00:00Z", "<a@x>")
+    mb.add("inbox", "B", "이상한\x1f제목", "보낸\x1f이", "2026-01-06T08:00:00Z", "<b@x>")
+    mb.add("inbox", "C", "그 다음 메일", "홍길동", "2026-01-07T08:00:00Z", "<c@x>")
+    p = backup.run_backup(client(url), str(tmp_path))
+    assert (p.saved, p.failed) == (3, 0)
+
+
+def test_rejected_batch_falls_back_to_single_items(server, tmp_path):
+    mb, url = server
+    for i in range(5):
+        mb.add("inbox", "M%d" % i, "제목 %d" % i, "보낸이", "2026-01-01T00:00:0%dZ" % i, "<m%d@x>" % i)
+    mb.fault_ids = {"M2"}
+    p = backup.run_backup(client(url), str(tmp_path))
+    assert (p.saved, p.failed) == (4, 1)  # 문제 있는 한 통만 건너뜀
+    mb.fault_ids = set()
+    p = backup.run_backup(client(url), str(tmp_path))
+    assert (p.saved, p.skipped, p.failed) == (1, 4, 0)
+
+
+def test_low_disk_stops_before_download(server, tmp_path, monkeypatch):
+    mb, url = server
+    fill(mb)
+    monkeypatch.setattr(backup, "MIN_FREE_BYTES", 10 ** 18)
+    with pytest.raises(backup.LowDisk):
+        backup.run_backup(client(url), str(tmp_path))
+    assert mb.operations == []  # 서버에 아무 요청도 보내지 않음
+    assert emls(str(tmp_path)) == []
+
+
+def test_single_instance_lock(tmp_path):
+    first = store.acquire_lock(str(tmp_path))
+    assert first is not None
+    assert store.acquire_lock(str(tmp_path)) is None
+    first.close()
+    again = store.acquire_lock(str(tmp_path))
+    assert again is not None
+    again.close()
+
+
+def test_default_folder_and_cloud_detection(monkeypatch, tmp_path):
+    assert os.path.basename(store.default_base_dir()) == "MailBackup"
+    assert os.path.basename(os.path.dirname(store.default_base_dir())).lower() in ("desktop", "바탕 화면", "바탕화면")
+    one = str(tmp_path / "OneDrive")
+    monkeypatch.setenv("OneDrive", one)
+    assert store.cloud_sync_name(os.path.join(one, "Desktop", "MailBackup")) == "OneDrive"
+    assert store.cloud_sync_name(str(tmp_path / "local" / "MailBackup")) == ""
+    assert store.cloud_sync_name(str(tmp_path / "OneDrive - Company" / "MailBackup")) == "OneDrive"
+    assert store.cloud_sync_name(str(tmp_path / "Dropbox" / "MailBackup")) == "클라우드"
+
+
+def test_torn_index_line_is_tolerated(server, tmp_path):
+    mb, url = server
+    fill(mb)
+    base = str(tmp_path)
+    backup.run_backup(client(url), base)
+    with open(os.path.join(base, "상태", "받은목록.jsonl"), "ab") as fh:
+        fh.write(b'{"key": "\xec\x9d')  # 줄 중간, 한글 글자 중간에서 끊김
+    p = backup.run_backup(client(url), base)
+    assert (p.saved, p.skipped) == (0, 5)
+    mb.add("inbox", "N", "새 메일", "a", "2026-05-01T00:00:00Z", "<n@x>")
+    assert backup.run_backup(client(url), base).saved == 1
+    assert backup.run_backup(client(url), base).saved == 0

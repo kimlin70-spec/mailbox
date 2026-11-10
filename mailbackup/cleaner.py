@@ -53,7 +53,7 @@ def html_to_text(html: str) -> str:
         pass
     text = "".join(parser.out).replace("\xa0", " ")
     lines = [re.sub(r"[ \t]+", " ", ln).strip() for ln in text.split("\n")]
-    lines = [re.sub(r"(\s*\|\s*)+$", "", ln) for ln in lines]
+    lines = [ln.rstrip(" |") for ln in lines]
     return tidy("\n".join(lines))
 
 
@@ -110,34 +110,31 @@ def squash(text: str) -> str:
     return re.sub(r"[\s>*|]+", "", text).lower()
 
 
-def _quote_samples(lines: list[str]) -> list[str]:
-    samples = []
-    for ln in lines:
-        if _RE_ORIG.match(ln) or _RE_FROM.match(ln) or _RE_HDR.match(ln) or _RE_WROTE.match(ln):
-            continue
-        s = squash(ln)
-        if len(s) >= 15:
-            samples.append(s)
-            if len(samples) == 3:
-                break
-    return samples
+def _is_header_line(ln: str) -> bool:
+    return bool(_RE_ORIG.match(ln) or _RE_FROM.match(ln) or _RE_HDR.match(ln) or _RE_WROTE.match(ln)
+                or _RE_RULE.match(ln))
 
 
 def strip_quote(text: str, earlier_squashed: list[str]) -> str:
-    """앞선 메일들(earlier_squashed)에 들어 있는 내용으로 확인되는 인용만 지운다."""
+    """이전 메일 인용을 지운다.
+
+    인용 표시 아래의 모든 줄이 같은 대화의 앞선 메일에 실제로 들어 있을 때만 지운다.
+    한 줄이라도 새 내용(인용 사이에 적은 답변 등)이 있으면 전부 남긴다.
+    """
+    if not earlier_squashed:
+        return text
     lines = text.split("\n")
     start = find_quote_start(lines)
     if start is None:
         return text
-    samples = _quote_samples(lines[start:])
-    if samples:
-        if not earlier_squashed:
-            return text
-        for s in samples:
-            if not any(s in e for e in earlier_squashed):
-                return text  # 확인 안 됨 → 남긴다
-    elif not earlier_squashed:
-        return text
+    for ln in lines[start:]:
+        if _is_header_line(ln):
+            continue
+        s = squash(ln)
+        if not s:
+            continue
+        if not any(s in e for e in earlier_squashed):
+            return text  # 확인되지 않는 줄이 있음 → 남긴다
     kept = lines[:start]
     while kept and _RE_RULE.match(kept[-1]):
         kept.pop()
@@ -148,12 +145,18 @@ def strip_quote(text: str, earlier_squashed: list[str]) -> str:
 
 _RE_DISCLAIMER = re.compile(
     r"(confidentiality notice|avis de confidentialit|^\s*disclaimer\b|"
-    r"this (e-?mail|message|communication|transmission)[^\n]{0,120}"
-    r"(confidential|privileged|intended (solely|only|recipient)|intended for)|"
-    r"ce (message|courriel|e-?mail|courrier)[^\n]{0,120}(confidentiel|destinataire|strictement)|"
-    r"본 (메일|이메일|전자우편|메시지)[^\n]{0,80}(기밀|비밀|수신인|수신자|법적)|"
-    r"please consider the environment before printing|"
-    r"pensez à l'environnement avant d'imprimer)", re.I | re.M)
+    r"this (e-?mail|message|communication|transmission)\b|"
+    r"ce (message|courriel|e-?mail|courrier)\b|"
+    r"본 (메일|이메일|전자우편|메시지))", re.I | re.M)
+# 면책 문구로 보려면 아래 세 묶음 중 두 가지 이상이 들어 있어야 한다.
+_DISCLAIMER_SIGNS = (
+    re.compile(r"confidential|confidentiel|privileged|기밀|비밀", re.I),
+    re.compile(r"intended|recipient|addressee|destinataire|수신인|수신자", re.I),
+    re.compile(r"delete|destroy|notify|unauthori[sz]ed|supprimer|détruire|interdite|삭제|통보|금지", re.I),
+)
+_RE_ECO = re.compile(
+    r"^\s*(please consider the environment before printing.*|"
+    r"pensez à l'environnement avant d'imprimer.*)$", re.I)
 _RE_MOBILE = re.compile(
     r"^\s*(sent from my \w+.*|envoyé (de|depuis) mon \w+.*|나의 \w+에서 보냄.*|get outlook for \w+.*|"
     r"télécharger outlook pour \w+.*|sent from outlook.*|outlook for (ios|android).*)$", re.I)
@@ -163,36 +166,52 @@ _RE_CLOSING = re.compile(
     r"salutations|sincères salutations|meilleures salutations|감사합니다|고맙습니다|수고하세요|"
     r"수고하십시오)[\s,.!~]*$", re.I)
 _RE_PS = re.compile(r"^\s*(p\.?\s?s\.?\b|추신)", re.I)
+_RE_SENTENCE_END = re.compile(r"([.?!]|니다|세요|어요|아요|습니까)\s*$")
 
 
 def strip_disclaimer(text: str) -> str:
-    m = _RE_DISCLAIMER.search(text)
-    if not m:
-        return text
-    start = text.rfind("\n", 0, m.start()) + 1
-    tail = text[start:]
-    # 본문 끝부분의 짧은 덩어리일 때만
-    if len(tail) > 2500 or (start < len(text) * 0.2 and len(text) > 600):
-        return text
-    return text[:start].rstrip()
+    """본문 맨 끝의 면책 문구만 지운다."""
+    for m in _RE_DISCLAIMER.finditer(text):
+        start = text.rfind("\n", 0, m.start()) + 1
+        tail = text[start:]
+        if len(tail) > 1500 or start < len(text) * 0.5 and len(text) > 400:
+            continue
+        if sum(1 for sign in _DISCLAIMER_SIGNS if sign.search(tail)) < 2:
+            continue
+        if find_quote_start(tail.split("\n")) is not None:
+            continue  # 뒤에 (남겨 둔) 인용이 있으면 건드리지 않는다
+        return text[:start].rstrip()
+    return text
+
+
+def _looks_like_signature(tail: list[str]) -> bool:
+    """이름·직함·연락처처럼 짧은 줄 몇 개뿐인지. 문장이 있으면 서명이 아니다."""
+    lines = [ln.strip() for ln in tail if ln.strip()]
+    if not lines or len(lines) > 6:
+        return False
+    for ln in lines:
+        if len(ln) > 60 or _RE_PS.match(ln):
+            return False
+        has_contact = bool(re.search(r"\d{3}|@|www\.|https?:", ln))
+        if not has_contact and _RE_SENTENCE_END.search(ln):
+            return False
+    return True
 
 
 def strip_signature(text: str) -> str:
-    lines = text.split("\n")
+    lines = [ln for ln in text.split("\n") if not _RE_ECO.match(ln)]
     # 휴대폰 꼬리말
     while lines and (not lines[-1].strip() or _RE_MOBILE.match(lines[-1])):
         lines.pop()
     # 표준 서명 구분선 "-- "
-    for i in range(len(lines) - 1, max(-1, len(lines) - 16), -1):
-        if lines[i].rstrip("\n") in ("-- ", "--"):
+    for i in range(len(lines) - 1, max(-1, len(lines) - 10), -1):
+        if lines[i] in ("-- ", "--") and _looks_like_signature(lines[i + 1:]):
             lines = lines[:i]
             break
     # 맺음말 뒤의 짧은 이름·직함·연락처
-    for i in range(len(lines) - 1, max(-1, len(lines) - 14), -1):
+    for i in range(len(lines) - 1, max(-1, len(lines) - 10), -1):
         if _RE_CLOSING.match(lines[i]):
-            tail = [ln for ln in lines[i + 1:] if ln.strip()]
-            if i > 0 and len(tail) <= 8 and all(len(ln) <= 90 for ln in tail) \
-                    and not any(_RE_PS.match(ln) for ln in tail):
+            if i > 0 and _looks_like_signature(lines[i + 1:]):
                 lines = lines[:i + 1]
             break
     return "\n".join(lines).rstrip()
