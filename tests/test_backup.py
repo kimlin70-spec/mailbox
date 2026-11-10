@@ -287,3 +287,20 @@ def test_torn_index_line_is_tolerated(server, tmp_path):
     mb.add("inbox", "N", "새 메일", "a", "2026-05-01T00:00:00Z", "<n@x>")
     assert backup.run_backup(client(url), base).saved == 1
     assert backup.run_backup(client(url), base).saved == 0
+
+
+def test_settings_remember_folder_and_recent_days(monkeypatch, tmp_path):
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    assert store.load_recent() == (False, 7)
+    assert not store.has_saved_base_dir()
+    store.save_settings(recent_only=True, recent_days=3)
+    assert store.load_recent() == (True, 3)
+    assert not store.has_saved_base_dir()          # 일수만 기억해도 저장 위치는 기본값 그대로
+    store.save_base_dir(str(tmp_path / "x"))
+    assert store.load_base_dir() == str(tmp_path / "x") and store.load_recent() == (True, 3)
+    store.save_settings(recent_only=False)
+    assert store.load_recent() == (False, 3)       # 체크를 풀어도 일수는 기억
+    text = open(os.path.join(str(tmp_path), "MailBackup", "settings.json"), encoding="utf-8").read()
+    assert set(__import__("json").loads(text)) == {"base_dir", "recent_only", "recent_days"}
+    store.save_settings(recent_days=999999)
+    assert store.load_recent() == (False, 7)       # 이상한 값은 무시

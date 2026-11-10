@@ -80,15 +80,20 @@ class App:
         ttk.Label(frm, text="비밀번호는 저장되지 않습니다. 실행할 때마다 입력합니다.",
                   foreground="#666").grid(row=4, column=1, columnspan=2, sticky="w")
 
-        self.recent_var = tk.BooleanVar(value=False)
-        self.days_var = tk.StringVar(value="7")
-        opt = ttk.Frame(frm)
-        opt.grid(row=5, column=0, columnspan=3, sticky="w", pady=(12, 0))
-        self.recent_chk = ttk.Checkbutton(opt, text="시험용: 최근", variable=self.recent_var)
+        recent_only, recent_days = store.load_recent()
+        self.recent_var = tk.BooleanVar(value=recent_only)
+        self.days_var = tk.StringVar(value=str(recent_days))
+        optbox = ttk.Frame(frm)
+        optbox.grid(row=5, column=0, columnspan=3, sticky="w", pady=(12, 0))
+        opt = ttk.Frame(optbox)
+        opt.pack(anchor="w")
+        self.recent_chk = ttk.Checkbutton(opt, text="빠른 실행: 최근", variable=self.recent_var)
         self.recent_chk.pack(side="left")
         self.days_spin = ttk.Spinbox(opt, from_=1, to=3650, width=5, textvariable=self.days_var)
         self.days_spin.pack(side="left", padx=4)
-        ttk.Label(opt, text="일 동안의 메일만 받기").pack(side="left")
+        ttk.Label(opt, text="일 동안의 메일만 확인").pack(side="left")
+        ttk.Label(optbox, text="체크를 풀면 메일함 전체를 확인합니다. 가끔은 전체로 실행해 주세요.",
+                  foreground="#666").pack(anchor="w", pady=(2, 0))
 
         btns = ttk.Frame(frm)
         btns.grid(row=6, column=0, columnspan=3, sticky="we", pady=(14, 8))
@@ -197,6 +202,13 @@ class App:
 
         if not self.confirm_cloud():
             return
+        try:  # 다음 실행 때도 같은 선택으로 시작하도록 기억
+            if days is not None:
+                store.save_settings(recent_only=True, recent_days=days)
+            else:
+                store.save_settings(recent_only=False)
+        except OSError:
+            pass
         self.stop_event.clear()
         self.bar.configure(mode="indeterminate")
         self.bar.start(15)

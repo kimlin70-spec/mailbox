@@ -71,7 +71,7 @@ def cloud_sync_name(path: str) -> str:
 
 
 def has_saved_base_dir() -> bool:
-    return os.path.exists(_settings_path())
+    return bool(load_settings().get("base_dir"))
 
 
 def acquire_lock(base_dir: str):
@@ -100,24 +100,42 @@ def _settings_path() -> str:
     return os.path.join(root, "MailBackup", "settings.json")
 
 
-def load_base_dir() -> str:
-    """저장 위치. 따로 정한 적이 없으면 바탕화면\\MailBackup."""
+def load_settings() -> dict:
     try:
         with open(_settings_path(), "r", encoding="utf-8") as fh:
-            value = json.load(fh).get("base_dir")
-        if isinstance(value, str) and value:
-            return value
-    except (OSError, ValueError, AttributeError):
-        pass
-    return default_base_dir()
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
 
 
-def save_base_dir(base_dir: str) -> None:
-    """저장 위치만 기억한다. (아이디·비밀번호는 저장하지 않는다.)"""
+def save_settings(**changes) -> None:
+    """화면 설정만 기억한다: 저장 위치, '최근 N일' 선택. (아이디·비밀번호는 저장하지 않는다.)"""
+    data = load_settings()
+    data.update(changes)
     path = _settings_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
-        json.dump({"base_dir": base_dir}, fh, ensure_ascii=False)
+        json.dump(data, fh, ensure_ascii=False)
+
+
+def load_base_dir() -> str:
+    """저장 위치. 따로 정한 적이 없으면 바탕화면\\MailBackup."""
+    value = load_settings().get("base_dir")
+    return value if isinstance(value, str) and value else default_base_dir()
+
+
+def save_base_dir(base_dir: str) -> None:
+    save_settings(base_dir=base_dir)
+
+
+def load_recent() -> tuple[bool, int]:
+    """('최근 N일만' 체크 여부, 일수)"""
+    data = load_settings()
+    days = data.get("recent_days")
+    if not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= 3650:
+        days = 7
+    return data.get("recent_only") is True, days
 
 
 class Index:
