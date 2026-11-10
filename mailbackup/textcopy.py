@@ -27,8 +27,8 @@ from datetime import datetime, timezone
 from . import cleaner, naming
 from .ews import Stopped
 
-VERSION = 2  # 변환 규칙이 바뀌면 올린다 → 전체를 다시 만든다
-CACHE_FILE = "텍스트색인_v%d.jsonl" % VERSION
+VERSION = 3  # 본문 변환 규칙이 바뀌면 올린다 → 대화 파일 전체를 다시 만든다
+CACHE_FILE = "텍스트색인_v2.jsonl"  # 메일별 색인 (형식이 바뀔 때만 이름을 바꾼다)
 THREADS_FILE = "대화파일.json"
 CSV_FILE = "대화목록.csv"
 

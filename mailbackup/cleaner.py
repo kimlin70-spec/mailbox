@@ -1,8 +1,7 @@
-"""메일 본문 정리: 이전 메일 인용, 서명, 면책 문구 제거.
+"""메일 본문 정리: 이전 메일 인용 제거.
 
-원칙: 애매하면 남긴다.
-  - 인용은 "같은 대화의 앞선 메일에 실제로 들어 있는 내용"으로 확인될 때만 지운다.
-  - 서명·면책 문구는 본문 끝부분의 짧은 덩어리일 때만 지운다.
+인용은 그 아래 모든 줄이 "같은 대화의 앞선 메일에 실제로 들어 있는 내용"으로 확인될 때만
+지운다. 서명·면책 문구는 지우지 않는다 (추측으로 본문을 잘못 지우지 않기 위해).
 """
 
 from __future__ import annotations
@@ -141,85 +140,6 @@ def strip_quote(text: str, earlier_squashed: list[str]) -> str:
     return "\n".join(kept)
 
 
-# ------------------------------------------------------------ 면책 문구·서명
-
-_RE_DISCLAIMER = re.compile(
-    r"(confidentiality notice|avis de confidentialit|^\s*disclaimer\b|"
-    r"this (e-?mail|message|communication|transmission)\b|"
-    r"ce (message|courriel|e-?mail|courrier)\b|"
-    r"본 (메일|이메일|전자우편|메시지))", re.I | re.M)
-# 면책 문구로 보려면 아래 세 묶음 중 두 가지 이상이 들어 있어야 한다.
-_DISCLAIMER_SIGNS = (
-    re.compile(r"confidential|confidentiel|privileged|기밀|비밀", re.I),
-    re.compile(r"intended|recipient|addressee|destinataire|수신인|수신자", re.I),
-    re.compile(r"delete|destroy|notify|unauthori[sz]ed|supprimer|détruire|interdite|삭제|통보|금지", re.I),
-)
-_RE_ECO = re.compile(
-    r"^\s*(please consider the environment before printing.*|"
-    r"pensez à l'environnement avant d'imprimer.*)$", re.I)
-_RE_MOBILE = re.compile(
-    r"^\s*(sent from my \w+.*|envoyé (de|depuis) mon \w+.*|나의 \w+에서 보냄.*|get outlook for \w+.*|"
-    r"télécharger outlook pour \w+.*|sent from outlook.*|outlook for (ios|android).*)$", re.I)
-_RE_CLOSING = re.compile(
-    r"^\s*(best regards|kind regards|warm regards|regards|sincerely|yours sincerely|thanks and regards|"
-    r"thanks & regards|br|rgds|cordialement|bien cordialement|très cordialement|bien à vous|"
-    r"salutations|sincères salutations|meilleures salutations|감사합니다|고맙습니다|수고하세요|"
-    r"수고하십시오)[\s,.!~]*$", re.I)
-_RE_PS = re.compile(r"^\s*(p\.?\s?s\.?\b|추신)", re.I)
-_RE_SENTENCE_END = re.compile(r"([.?!]|니다|세요|어요|아요|습니까)\s*$")
-
-
-def strip_disclaimer(text: str) -> str:
-    """본문 맨 끝의 면책 문구만 지운다."""
-    for m in _RE_DISCLAIMER.finditer(text):
-        start = text.rfind("\n", 0, m.start()) + 1
-        tail = text[start:]
-        if len(tail) > 1500 or start < len(text) * 0.5 and len(text) > 400:
-            continue
-        if sum(1 for sign in _DISCLAIMER_SIGNS if sign.search(tail)) < 2:
-            continue
-        if find_quote_start(tail.split("\n")) is not None:
-            continue  # 뒤에 (남겨 둔) 인용이 있으면 건드리지 않는다
-        return text[:start].rstrip()
-    return text
-
-
-def _looks_like_signature(tail: list[str]) -> bool:
-    """이름·직함·연락처처럼 짧은 줄 몇 개뿐인지. 문장이 있으면 서명이 아니다."""
-    lines = [ln.strip() for ln in tail if ln.strip()]
-    if not lines or len(lines) > 6:
-        return False
-    for ln in lines:
-        if len(ln) > 60 or _RE_PS.match(ln):
-            return False
-        has_contact = bool(re.search(r"\d{3}|@|www\.|https?:", ln))
-        if not has_contact and _RE_SENTENCE_END.search(ln):
-            return False
-    return True
-
-
-def strip_signature(text: str) -> str:
-    lines = [ln for ln in text.split("\n") if not _RE_ECO.match(ln)]
-    # 휴대폰 꼬리말
-    while lines and (not lines[-1].strip() or _RE_MOBILE.match(lines[-1])):
-        lines.pop()
-    # 표준 서명 구분선 "-- "
-    for i in range(len(lines) - 1, max(-1, len(lines) - 10), -1):
-        if lines[i] in ("-- ", "--") and _looks_like_signature(lines[i + 1:]):
-            lines = lines[:i]
-            break
-    # 맺음말 뒤의 짧은 이름·직함·연락처
-    for i in range(len(lines) - 1, max(-1, len(lines) - 10), -1):
-        if _RE_CLOSING.match(lines[i]):
-            if i > 0 and _looks_like_signature(lines[i + 1:]):
-                lines = lines[:i + 1]
-            break
-    return "\n".join(lines).rstrip()
-
-
 def clean_body(text: str, earlier_squashed: list[str]) -> str:
-    text = tidy(text)
-    text = strip_quote(text, earlier_squashed)
-    text = strip_disclaimer(text)
-    text = strip_signature(text)
-    return tidy(text)
+    """앞선 메일과 겹치는 인용만 지운다. 서명·면책 문구 등 그 밖의 내용은 그대로 둔다."""
+    return tidy(strip_quote(tidy(text), earlier_squashed))

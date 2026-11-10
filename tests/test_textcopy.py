@@ -92,11 +92,11 @@ def test_thread_file_cleaning_attachments_csv(tmp_path):
     assert "- 받는사람: Élodie Dupont <elodie@ambatovy.mg>" in md
     assert "- 참조: John Smith <john@ambatovy.mg>" in md
     assert "- 제목: RE: 보일러 점검 일정" in md
-    # 인용·서명·면책 문구 제거
+    # 앞선 메일과 겹치는 인용만 제거, 서명·면책 문구는 그대로
     assert md.count("가능 여부 알려 주세요") == 1
     assert "Sent: Monday" not in md
-    assert "confidential" not in md
-    assert "Tel. +261" not in md and "Ingénieure maintenance" not in md
+    assert md.count("confidential") == 1
+    assert "Tel. +261" in md and "Ingénieure maintenance" in md
     assert "감사합니다." in md and "Cordialement," in md
     # 첨부: 파일명만 적고 파일은 꺼내지 않는다 (서명 로고는 목록에서도 제외)
     assert "- 첨부: 점검 계획서.pdf (원본 메일을 열어서 확인)" in md and "%PDF" not in md
@@ -193,30 +193,10 @@ def test_broken_file_does_not_stop(tmp_path):
 
 
 def test_cleaner_rules():
-    # 긴 본문 앞쪽의 'confidential' 언급은 면책 문구가 아니다
-    text = "This message is confidential project info.\n" + "내용 줄입니다. " * 100 + "\n끝."
-    assert cleaner.strip_disclaimer(text) == text
-    # 추신이 있으면 서명으로 보지 않는다
-    text = "본문입니다.\n\nBest regards,\nKim\nP.S. 내일 회의 잊지 마세요"
-    assert "P.S." in cleaner.strip_signature(text)
-    assert cleaner.strip_signature("내용\n\nSent from my iPhone") == "내용"
-    assert cleaner.strip_signature("내용\n-- \n홍길동\n010-0000-0000") == "내용"
-    # 맺음말 뒤에 문장이 이어지면 서명이 아니다
-    text = "자료 보냅니다.\n\n감사합니다.\n참고로 내일은 휴가입니다.\n급한 건은 김 과장에게 연락 주세요."
-    assert cleaner.strip_signature(text) == text
-    # 구분선 아래에 내용이 있으면 남긴다
-    text = "1안\n--\n2안은 다음 주에 다시 검토하겠습니다."
-    assert cleaner.strip_signature(text) == text
-    # 평범한 문장은 면책 문구가 아니다
-    text = "안녕하세요.\n\nThis message is intended for all shift supervisors.\nPlease check the schedule."
-    assert cleaner.strip_disclaimer(text) == text
-    text = "본문\n\nThis email contains confidential pricing.\n단가는 첨부를 참고하세요."
-    assert cleaner.strip_disclaimer(text) == text
-    # 빈 칸이 많은 표도 바로 처리된다
-    import time
-    t0 = time.time()
-    out = cleaner.html_to_text("<table><tr>" + "<td></td>" * 60 + "<td>값</td></tr></table>")
-    assert "값" in out and time.time() - t0 < 1
+    # 서명·면책 문구·추신은 건드리지 않는다
+    text = "본문입니다.\n\nBest regards,\nKim\nTel. 010-0000-0000\n\nThis e-mail is confidential and intended solely for the addressee."
+    assert cleaner.clean_body(text, []) == text
+    assert cleaner.clean_body(text, [cleaner.squash("다른 메일")]) == text
     # Gmail 식 인용
     earlier = [cleaner.squash("원래 메일의 내용이 여기에 충분히 길게 있습니다.")]
     reply = "네 알겠습니다.\n\n2026년 1월 5일 (월) 오후 3:00, 홍길동 <a@b>님이 작성:\n> 원래 메일의 내용이 여기에 충분히 길게 있습니다."
@@ -224,6 +204,11 @@ def test_cleaner_rules():
     assert "원래 메일" in cleaner.clean_body(reply, [])
     assert textcopy.normalize_subject("RE: FW: TR: 회신: 제목") == ("제목", True)
     assert textcopy.normalize_subject("Report: Q1") == ("Report: Q1", False)
+    # 빈 칸이 많은 표도 바로 처리된다
+    import time
+    t0 = time.time()
+    out = cleaner.html_to_text("<table><tr>" + "<td></td>" * 60 + "<td>값</td></tr></table>")
+    assert "값" in out and time.time() - t0 < 1
 
 
 def test_orphan_reply_joins_by_subject(tmp_path):
